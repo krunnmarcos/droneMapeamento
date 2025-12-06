@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import random
 from dataclasses import dataclass
+from statistics import mean, pstdev
 from typing import List, Sequence
 
 from data_loader import CoordinateRecord, CoordinatesLoader
 from flight_engine import BASE_CEP, WindForecast
 from solution_engine import RouteEvaluator, TourStats
 from solution_exporter import export_solution
+from route_visualizer import plot_route
 
 
 @dataclass
@@ -22,9 +24,9 @@ class GeneticOptimizer:
         self,
         coordinate_records: Sequence[CoordinateRecord],
         forecast: WindForecast,
-        population_size: int = 80,
-        mutation_rate: float = 0.03,
-        tournament_size: int = 3,
+        population_size: int = 120,
+        mutation_rate: float = 0.04,
+        tournament_size: int = 5,
         random_seed: int | None = None,
     ) -> None:
         if population_size < 2:
@@ -52,10 +54,10 @@ class GeneticOptimizer:
             if best_overall is None or best_generation.fitness > best_overall.fitness:
                 best_overall = best_generation
             if log_interval and generation % log_interval == 0:
-                self._print_generation_log(generation, best_generation)
+                self._print_generation_log(generation, evaluated, best_generation)
             population = self._produce_next_generation(population, evaluated)
         assert best_overall is not None
-        self._print_generation_log(generations, best_overall, prefix="Final")
+        self._print_generation_log(generations, [best_overall], best_overall, prefix="Final")
         return best_overall
 
     def decode_route(self, genome: Sequence[int]) -> List[str]:
@@ -64,8 +66,7 @@ class GeneticOptimizer:
     def _initialize_population(self) -> List[List[int]]:
         base_genome = list(range(self.genome_length))
         population: List[List[int]] = []
-        nn_genome = self._generate_nearest_neighbor_genome()
-        population.append(nn_genome)
+        population.append(self._generate_nearest_neighbor_genome())
         for _ in range(self.population_size - 1):
             genome = base_genome.copy()
             self.random.shuffle(genome)
@@ -87,25 +88,7 @@ class GeneticOptimizer:
             ordered_ceps.append(next_cep)
             remaining.remove(next_cep)
             current_cep = next_cep
-        genome = [self.cep_to_index[cep] for cep in ordered_ceps]
-        return self._iterated_two_opt(genome)
-
-    def _iterated_two_opt(self, genome: List[int], iterations: int = 5) -> List[int]:
-        best = self._two_opt_improve(genome)
-        best_distance = self._route_distance(best)
-        for _ in range(iterations):
-            candidate = best.copy()
-            if len(candidate) >= 4:
-                i, j = sorted(self.random.sample(range(len(candidate)), 2))
-                if i == j:
-                    continue
-                candidate[i:j] = reversed(candidate[i:j])
-            candidate = self._two_opt_improve(candidate)
-            candidate_distance = self._route_distance(candidate)
-            if candidate_distance < best_distance - 1e-6:
-                best = candidate
-                best_distance = candidate_distance
-        return best
+        return [self.cep_to_index[cep] for cep in ordered_ceps]
 
     def _two_opt_improve(self, genome: List[int]) -> List[int]:
         best = genome.copy()
@@ -148,14 +131,6 @@ class GeneticOptimizer:
             coord_b = self.route_evaluator.coordinates[cep_b]
             self.distance_cache[key] = self.route_evaluator.physics.calculate_haversine(coord_a, coord_b)
         return self.distance_cache[key]
-
-    def _route_distance(self, genome: Sequence[int]) -> float:
-        total = 0.0
-        for idx in range(len(genome) + 1):
-            node_a = self._node_for_position(genome, idx - 1)
-            node_b = self._node_for_position(genome, idx)
-            total += self._distance_between_nodes(node_a, node_b)
-        return total
 
     def _evaluate_individual(self, genome: Sequence[int]) -> IndividualRecord:
         cep_sequence = self.decode_route(genome)
@@ -210,16 +185,29 @@ class GeneticOptimizer:
     def _mutate(self, genome: List[int]) -> None:
         if self.genome_length < 2:
             return
+        mutated = False
         if self.random.random() <= self.mutation_rate:
             i, j = self.random.sample(range(self.genome_length), 2)
             genome[i], genome[j] = genome[j], genome[i]
+            mutated = True
+        if mutated and self.genome_length >= 4 and self.random.random() < 0.1:
+            self._two_opt_improve(genome)
 
     @staticmethod
-    def _print_generation_log(generation: int, record: IndividualRecord, prefix: str | None = None) -> None:
-        minutes = record.stats.total_mission_duration_seconds / 60.0
+    def _print_generation_log(
+        generation: int,
+        evaluated: List[IndividualRecord],
+        best: IndividualRecord,
+        prefix: str | None = None,
+    ) -> None:
         label = prefix or f"Geração {generation}"
+        fitness_values = [rec.fitness for rec in evaluated]
+        avg = mean(fitness_values)
+        std = pstdev(fitness_values) if len(fitness_values) > 1 else 0.0
+        minutes = best.stats.total_mission_duration_seconds / 60.0
         print(
-            f"{label}: Fitness={record.fitness:.6f} | Tempo={minutes:.2f} min | Paradas={record.stats.total_stops}"
+            f"{label}: BestFit={best.fitness:.6f} AvgFit={avg:.6f} StdFit={std:.6f} "
+            f"TempoBest={minutes:.2f} min ParadasBest={best.stats.total_stops}"
         )
 
 
@@ -241,3 +229,8 @@ if __name__ == "__main__":
     print(best_route)
     export_path = export_solution(best.stats, "melhor_solucao.csv")
     print(f"CSV salvo em {export_path}")
+    try:
+        img_path = plot_route(best.stats, "melhor_rota.png")
+        print(f"Gráfico salvo em {img_path}")
+    except Exception as exc:  # pragma: no cover - visual aid only
+        print(f"Falha ao gerar gráfico: {exc}")
