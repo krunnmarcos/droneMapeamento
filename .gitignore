@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.venv/
+melhor_solucao.csv
+melhor_rota.png
+demo_coords.csv
